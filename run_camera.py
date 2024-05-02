@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import argparse
 import cv2
 import numpy as np
@@ -8,7 +9,6 @@ from torchvision.transforms import Compose
 
 from depth_anything.dpt import DepthAnything
 from depth_anything.util.transform import Resize, NormalizeImage, PrepareForNet
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -47,6 +47,8 @@ if __name__ == '__main__':
     ])
 
     cap = cv2.VideoCapture(0)
+    # cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    # cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     frame_count = 0
     while cap.isOpened():
         ret, frame = cap.read()
@@ -54,20 +56,16 @@ if __name__ == '__main__':
             break
 
         frame_count += 1
-        if frame_count % 4 == 0:
+        if frame_count % 2 != 0:
             continue
 
-        
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) / 255.0
-        # resize the frame to the desired size multiple of 14 for the model
-        frame = cv2.resize(frame, (518, 518), interpolation=cv2.INTER_CUBIC)
+        frame = frame / 255.0
+        clone = frame.copy()
         frame_height, frame_width = frame.shape[:2]
-        print(frame.shape)
-        # frame = transform({'frame': frame})['frame']
+
+        frame = transform({'image': frame})['image']
         frame = torch.from_numpy(frame).unsqueeze(0).to(DEVICE)
-        frame = frame.permute(0, 3, 1, 2)
-        frame = frame.float()
-        print(frame.shape)
+
         with torch.no_grad():
             depth = depth_anything(frame)
 
@@ -78,12 +76,10 @@ if __name__ == '__main__':
         depth_color = cv2.applyColorMap(depth, cv2.COLORMAP_INFERNO)
         
         split_region = np.ones((frame_height, margin_width, 3), dtype=np.float32) * 255
-        frame_np = frame.squeeze().permute(1, 2, 0).cpu().numpy()
+
         depth_np = depth_color.astype(np.float32) / 255.0
-        print("frame_np shape", frame_np.shape, "type", frame_np.dtype)
-        print("depth_np shape", depth_np.shape, "type", depth_np.dtype)
-        print("split_region shape", split_region.shape, "type", split_region.dtype)
-        combined_frame = cv2.hconcat([frame_np, split_region, depth_np])
+
+        combined_frame = cv2.hconcat([clone.astype(np.float32), split_region, depth_np])
         caption_space = np.ones((caption_height, combined_frame.shape[1], 3), dtype=np.float32) * 255
         captions = ['Raw image', 'Depth Anything']
         segment_width = frame.shape[1] + margin_width
@@ -103,5 +99,5 @@ if __name__ == '__main__':
         if cv2.waitKey(1) == ord('q'):
             break
     cap.release()
-
+    cv2.destroyAllWindows()
 
