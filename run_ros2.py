@@ -14,20 +14,46 @@ from matplotlib import pyplot as plt
 from sensor_msgs.msg import PointCloud2, PointField, Image
 import rclpy
 import cv_bridge
+default_width = 1920
+default_height = 1080
 cx, cy, fx, fy = 966.9719095357877, 521.7551265973169, 1452.5141034625492, 1443.1773620289302
+transform_intrinsics = False
+
+frame = None
+
+
+def process_images(image, clone):
+    global cx, cy, fx, fy, transform_intrinsics
+    orig_height, orig_width = image.shape[:2]
+    if not transform_intrinsics:
+        cx, cy, fx, fy = cx * orig_width / default_width, cy * orig_height / default_height, fx * orig_width / default_width, fy * orig_height / default_height
+        transform_intrinsics = True
+    image = transform({'image': image})['image']
+    frame_height, frame_width = image.shape[:2]
+    image = torch.from_numpy(image).unsqueeze(0).to(DEVICE)
+    with torch.no_grad():
+        depth = depth_anything(image)
+
+    depth = F.interpolate(depth[None], (orig_height, orig_width), mode='bilinear', align_corners=False)[0, 0]
+    depth2pt(clone, depth)
 
 def image_callback(msg):
+    global frame, cx, cy, fx, fy, transform_intrinsics
     bridge = cv_bridge.CvBridge()
     frame = bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+    clone = frame.copy()
+    process_images(frame, clone)
 
-def depth2pt(frame, depth, orig_height, orig_width):
+def depth2pt(image, depth):
         global cx, cy, fx, fy
 
+        # Z = 1.40 - (depth.cpu().squeeze().numpy())/18
+        Z = 20.5/depth.cpu().squeeze().numpy()
+        # Z = depth.cpu().squeeze().numpy()
         height, width = depth.shape
-        # Z = 1.40 - (depth.cpu().squeeze().numpy())/20
-        Z = depth.cpu().squeeze().numpy()
+        print("max depth: ", Z.max())
+        print("min depth: ", Z.min())
         meshgrid = np.meshgrid(range(width), range(height), indexing='xy')
-
         # Convert depth to point cloud in camera coordinates
         points = np.stack(((meshgrid[0]-cx) * Z / fx, (meshgrid[1]-cy) * Z / fy, Z), axis=2)
 
@@ -41,7 +67,7 @@ def depth2pt(frame, depth, orig_height, orig_width):
         points_flat = points_ros.reshape(-1, 3)
 
         # Add RGB to point cloud
-        rgb_flat = frame.reshape(-1, 3)
+        rgb_flat = image.reshape(-1, 3)
 
         # Assuming your RGBD camera and ROS setup require specific handling for RGB data,
         # the following line combines XYZ and RGB into a single array for PointCloud2
@@ -79,7 +105,7 @@ if __name__ == '__main__':
     rclpy.init()
     node = rclpy.create_node('point_cloud_publisher')
     pt_pub = node.create_publisher(PointCloud2, 'point_cloud', 10)
-    image_sub = node.create_subscription(Image, 'image', image_callback, 10)
+    image_sub = node.create_subscription(Image, 'image_raw', image_callback, 10)
     args = parser.parse_args()  
     
     margin_width = 50
@@ -114,24 +140,20 @@ if __name__ == '__main__':
         cap = cv2.VideoCapture(0)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frame = frame / 255.0
-        clone = frame.copy()
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame = frame / 255.0
+            clone = frame.copy()
 
-        orig_height, orig_width = frame.shape[:2]
-        frame = transform({'image': frame})['image']
-        frame_height, frame_width = frame.shape[:2]
-        frame = torch.from_numpy(frame).unsqueeze(0).to(DEVICE)
-        with torch.no_grad():
-            depth = depth_anything(frame)
+            process_images(frame, clone)
+            if cv2.waitKey(1) == ord('q'):
+                break
+        cap.release()
+        cv2.destroyAllWindows()
+    else:
+        rclpy.spin(node)
+            
 
-        depth = F.interpolate(depth[None], (orig_height, orig_width), mode='bilinear', align_corners=False)[0, 0]
-        depth2pt(clone, depth, orig_height, orig_width)
-        if cv2.waitKey(1) == ord('q'):
-            break
-    cap.release()
-    cv2.destroyAllWindows()
-    rclpy.shutdown()
+        rclpy.shutdown()
